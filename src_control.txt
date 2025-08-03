@@ -86,8 +86,8 @@ float error_roll_I_max = 10; //ロールI制御用制限値
 float Kp_p = 0.1;    // ロールレートPゲイン
 
 float yaw_ref = 0;         // 目標ヨー角
-float Kp_yaw = 0.001;  // ヨー角Pゲイン
-float Ki_yaw = 0.001;  // ヨー角Iゲイン
+float Kp_yaw = 0.01;  // ヨー角Pゲイン
+float Ki_yaw = 0.01;  // ヨー角Iゲイン
 float error_yaw_I = 0; // ヨーI制御用変数
 float error_yaw_I_max = 10; //ヨーI制御用制限値
 
@@ -185,6 +185,7 @@ void get_bno055_data()
   roll = -euler.z();
   pitch = euler.y();
   yaw = euler.x();
+  if (yaw > 180) yaw = yaw-360;
 }
 
 // サーボ角度指示
