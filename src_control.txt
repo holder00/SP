@@ -1,0 +1,447 @@
+#include <Arduino.h>
+#include <Adafruit_BNO055.h>
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEServer.h>
+#include <BLE2902.h>
+
+#define SERVICE_UUID           "6E400001-B5A3-F393-E0A9-E50E24DCCA9E" // UART service UUID
+#define CHARACTERISTIC_UUID_RX "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
+#define CHARACTERISTIC_UUID_TX "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
+#define DEVICENAME "SUBARU test"
+#define INTERVAL 1000 //millisec
+
+// サーボの設定はここで
+// float ServoMaxAng = 90.0;
+// float ServoMinAng = -60.0;
+int servo1Pin = D9;
+
+String rx_Str; // 受信文字列
+String tx_Str; // 送信文字列
+bool deviceConnected = false;
+bool oldDeviceConnected = false;
+bool BLE_Received = false; // 受信フラグ
+
+String rcvgains_list;
+String cmds[7] = { "\n" };
+
+String rcv_power;
+
+Adafruit_BNO055 bno = Adafruit_BNO055(55, 0x29); // 秋月は0x28、Amazon中華は0x29
+
+BLEServer *pServer = NULL;
+BLECharacteristic *pTxCharacteristic;
+unsigned long time_data = 0;
+boolean isrequested = false;
+
+// 歩行検知用定数
+unsigned long preMillis = 0;   // 経過時間格納用
+unsigned long interval = 500;  // 処理周期 ms
+int stopCount;  // 停止検知カウンタ
+int stepCount = 0; // 歩数
+float threshold = 1.2; // 歩行とみなす加速度のしきい値（g単位）
+unsigned long lastStepTime = 0; // 最後に止まった時間
+unsigned long stepDelay = 300;  // 歩行周期
+
+// システム用
+bool flg_patapata;
+bool autoMode;
+bool SendMsg;
+int phaseCount;
+bool Launch_flg;
+bool Launch_ready_Motion;
+bool Fire_Flg;
+
+// サーボ制御
+float elv_deg;
+unsigned long second = 0;
+float DutyCycle;
+
+// モーター出力PWMDuty
+int setVal;            // 設定値
+float nowVal;          // 現在値
+float easing = 0.1;    // 徐変パラメータ
+
+
+
+// センサー値（IMUから取得）
+
+
+float roll, pitch, yaw;
+float accX, accY, accZ;
+float p, q, r;
+
+// 制御用
+// float Kp_roll = 8.0;  // ロール角ゲイン
+// float Kp_p = 2.0;    // ロールレートゲイン
+// float Kp_yaw = 1.0;  // ヨー角ゲイン
+// float Kp_r = 0.3;    // ヨーレートゲイン
+
+float roll_ref = 0;  //センサーの取り付け誤差、機体特性によりロールのニュートラル角度がずれている前提で用意　真っ直ぐ飛んでいるときのロール角ををモニタリングしてここに入れる。
+float Kp_roll = 2.0;  // ロール角Pゲイン
+float Ki_roll = 0.1;  // ロール角Iゲイン
+float error_roll_I = 0;  //ロールI制御用変数
+float error_roll_I_max = 10; //ロールI制御用制限値
+
+float Kp_p = 0.1;    // ロールレートPゲイン
+
+float yaw_ref = 0;         // 目標ヨー角
+float Kp_yaw = 0.001;  // ヨー角Pゲイン
+float Ki_yaw = 0.001;  // ヨー角Iゲイン
+float error_yaw_I = 0; // ヨーI制御用変数
+float error_yaw_I_max = 10; //ヨーI制御用制限値
+
+float Kp_r = 0.005;    // ヨーレートゲイン
+float delta_a_max = 30.0;  // サーボ最大偏角（deg）
+
+float pitch_ref = 60;       // 目標ピッチ角
+float Kp_pitch = 0.1;        // ピッチ角Pゲイン
+float Ki_pitch = 0.01;  // ピッチ角Iゲイン
+float error_pitch_I = 0;  //ピッチI制御用
+float error_pitch_I_max = 10; //ピッチI制御用制限値
+
+int servoAngleTest;
+
+class MyServerCallbacks: public BLEServerCallbacks {
+  void onConnect(BLEServer* pServer) {
+    deviceConnected = true;
+    Serial.println("** device connected");
+  };
+
+  void onDisconnect(BLEServer* pServer) {
+    deviceConnected = false;
+    Serial.println("** device disconnected");
+  }
+};
+
+// 受信時コールバック 文字列取得
+class MyCallbacks: public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *pCharacteristic) {
+      // std::string rxValue = pCharacteristic->getValue();
+      String rxValue = pCharacteristic->getValue(); // ESP32 development board to version 3.0.0 above
+      rx_Str = String(rxValue.c_str()); // std::stringをStringに変換
+      BLE_Received = true;               // 受信フラグセット
+    }
+};
+
+void init_BLE()
+{
+  // BLE関係初期化
+  BLEDevice::init("SUBARU test");
+  pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+  pTxCharacteristic = pService->createCharacteristic(CHARACTERISTIC_UUID_TX, BLECharacteristic::PROPERTY_NOTIFY);
+  pTxCharacteristic->addDescriptor(new BLE2902());
+  BLECharacteristic *pRxCharacteristic = pService->createCharacteristic(CHARACTERISTIC_UUID_RX, BLECharacteristic::PROPERTY_WRITE);
+  pRxCharacteristic->setCallbacks(new MyCallbacks());      
+  pService->start();  
+  pServer->getAdvertising()->start();
+  Serial.println("Waiting a client connection to notify...");
+}
+
+// BLEでメッセージを送る
+void sendMsg(char string0[])
+{
+  if (deviceConnected) 
+  {
+    pTxCharacteristic->setValue(string0);
+    pTxCharacteristic->notify();
+  }
+}
+
+int split(String data, char delimiter, String* dst) {
+  int index = 0;
+  int arraySize = (sizeof(data)) / sizeof((data[0]));
+  int datalength = data.length();
+
+  for (int i = 0; i < datalength; i++) {
+    char tmp = data.charAt(i);
+    if (tmp == delimiter) {
+      index++;
+      if (index > (arraySize - 1)) return -1;
+    } else dst[index] += tmp;
+  }
+  return (index + 1);
+}
+
+// 9軸センサ値取得
+void get_bno055_data()
+{
+  // センサ値取得
+  imu::Vector<3> acc = bno.getVector(Adafruit_BNO055::VECTOR_ACCELEROMETER);
+  imu::Vector<3> gyr = bno.getVector(Adafruit_BNO055::VECTOR_GYROSCOPE);
+  imu::Vector<3> euler = bno.getVector(Adafruit_BNO055::VECTOR_EULER);
+  
+  accX = acc.x();
+  accY = -acc.y();
+  accZ = -acc.z();
+
+  p = gyr.x();
+  q = -gyr.y();
+  r = -gyr.z();
+
+  // left hand zyx-euler
+  roll = -euler.z();
+  pitch = euler.y();
+  yaw = euler.x();
+}
+
+// サーボ角度指示
+void setServoAng(float deg)
+{
+  float norm_angle = deg / 90.0;
+  DutyCycle = 1500 + norm_angle * (2500 - 500) / 2;
+  if (DutyCycle < 500) { DutyCycle = 500; }
+  if (DutyCycle > 2500) { DutyCycle = 2500; } // 上限の修正
+
+  digitalWrite(servo1Pin, HIGH);
+  delayMicroseconds(DutyCycle);
+  digitalWrite(servo1Pin, LOW);
+  delayMicroseconds(20 * 1000 - DutyCycle); // 20ms周期
+}
+
+// システム起動通知
+void servoOpening()
+{
+  int cnt = 0;
+  int cnt_m = 0;
+
+  while (cnt_m <= 1)
+  {
+    if (cnt > 100) { cnt_m += 1; cnt = 0; }
+    cnt++;
+    // if (cnt_m == 0) { setServoAng(ServoMaxAng); }
+    // else if (cnt_m == 1) { setServoAng(ServoMinAng); }
+  }
+}
+
+void setup() 
+{
+  Serial.begin(115200);
+
+  // 出力ポート初期化
+  pinMode(10, OUTPUT);
+  pinMode(D1, OUTPUT);
+  pinMode(D0, OUTPUT);
+  pinMode(D9, OUTPUT);
+  pinMode(D10, OUTPUT);
+
+  // // アナログ式加速度センサ用ポート初期化
+  // pinMode(D8, INPUT);
+  // pinMode(D7, INPUT);
+
+  digitalWrite(D9, HIGH); // ポート初期値
+
+  // LEDC関数を新しい形式に修正
+  ledcAttach(D10, 50, 10); // ピン、周波数、分解能
+
+  // ledcSetup(1, 50, 10); //チャンネル1、50hz、分解能10bit.
+  // ledcAttachPin(D10, 1); // D10にモーター出力割り当て
+
+  // フラグ類初期化
+  Launch_flg = false;
+  SendMsg = false;
+  servoAngleTest = 15;
+  stopCount = 0;
+  phaseCount = 0;
+  Launch_ready_Motion = false;
+  Fire_Flg = false;
+  flg_patapata = false;
+  autoMode = false;
+
+  init_BLE();
+  if (!bno.begin()) // センサの初期化
+  {
+    Serial.print("Ooops, no BNO055 detected ... Check your wiring or I2C ADDR!");
+  }
+
+  delay(100);
+  bno.setExtCrystalUse(false);
+}
+
+void update_gains()
+{
+  int index = split(rcvgains_list, ',', cmds);
+  for(int i=0;i < index;i++){
+    if (i==0) {Kp_roll = cmds[i].toInt();}
+    if (i==1) {Ki_roll = cmds[i].toInt();}
+    if (i==2) {Kp_p = cmds[i].toInt();}
+    if (i==3) {Kp_yaw = cmds[i].toInt();}
+    if (i==4) {Ki_yaw = cmds[i].toInt();}
+    if (i==5) {Kp_pitch = cmds[i].toInt();}
+    if (i==6) {Ki_pitch = cmds[i].toInt();}
+    cmds[i] = "";
+  }
+}
+
+void control_loop()
+{
+  // まずは姿勢を崩さないことを優先しロールを優先的に抑制－＞そのうえでヨー変更するためためにロールを行う
+  //　⇒ロール関係のゲイン（Kp_roll、Kp_p）高め、ヨー関係のゲイン（Kp_yaw、Kp_r）弱め
+  // ロール制御（高優先）
+  float error_roll = roll_ref - roll;
+  float p_cmd = -Kp_roll * error_roll -Ki_roll * error_roll_I;          // ロール角→目標ロールレート
+  float delta_a_roll = -Kp_p * (p_cmd - p);  // ロールレート制御
+
+  error_roll_I += error_roll;
+  if (error_roll_I > error_roll_I_max) error_roll_I = error_roll_I_max;
+  if (error_roll_I < -error_roll_I_max) error_roll_I = -error_roll_I_max;
+
+  // ヨー制御（低優先）
+  float error_yaw = yaw_ref - yaw;
+  float r_cmd = Kp_yaw * error_yaw;  // ヨー角→目標ヨーレート
+  float delta_a_yaw = Kp_r * (r_cmd - r);  // ヨーレート制御
+
+  error_yaw_I += error_yaw;
+  if (error_yaw_I > error_yaw_I_max) error_yaw_I = error_yaw_I_max;
+  if (error_yaw_I < -error_yaw_I_max) error_yaw_I = -error_yaw_I_max;
+
+  // エルロン入力
+  float delta_a = delta_a_roll + delta_a_yaw;
+
+  // 飽和処理
+  if (delta_a > delta_a_max) delta_a = delta_a_max;
+  if (delta_a < -delta_a_max) delta_a = -delta_a_max;
+  elv_deg = delta_a; 
+
+  Serial.print(delta_a_roll);
+  Serial.print(',');
+  Serial.println(delta_a_yaw);
+  
+  // サーボ角度反映
+  setServoAng(elv_deg); // リモートでサーボ動かすときはservoAngleTest、自律制御はelv_deg
+}
+
+void update_power()
+{
+  int index = split(rcv_power, ',', cmds);
+  for(int i=0;i < index;i++){
+    if (i==0) {setVal = cmds[i].toInt();}
+    cmds[i] = "";
+  }
+}
+
+void control_motor()
+{
+  // モーター出力
+  float error_pitch = pitch_ref - pitch;
+  float power_ref = setVal + Kp_pitch * error_pitch +0* Ki_pitch * error_pitch_I;
+
+  error_pitch_I += error_pitch;
+  if (error_pitch_I > error_pitch_I_max) error_pitch_I = error_pitch_I_max;
+  if (error_pitch_I < -error_pitch_I_max) error_pitch_I = -error_pitch_I_max;
+  
+  nowVal += (power_ref - nowVal) * easing; // 徐変制御
+  
+  // 飽和処理
+  if (nowVal > 1) nowVal = 1;
+  if (nowVal < 0) nowVal = 0;
+  // Serial.print(pitch);
+  // Serial.print(',');
+  // Serial.println(nowVal);
+  // ledcWrite(1, (int)(nowVal* 10.23)); // モーター出力
+  ledcWrite(D10, (int)(nowVal* 10.23)); // モーター出力
+}
+
+void loop() 
+{
+  //replace yaw_ref to yaw for Debug
+  yaw_ref = yaw;
+  // センサ情報取得
+  get_bno055_data(); 
+
+  // サーボ制御角度 PID計算
+  control_loop();
+  control_motor();
+
+
+   
+  //*******Print Funcs*******
+  // printServoAngle();
+  // printAngles();
+  // printGYR();
+  // printGains();
+  // printErrors();
+  //*******Print Funcs*******
+
+  // BLE接続されていて送信用フラグがTrueのときは値送信
+  if (deviceConnected) 
+  {
+    if (BLE_Received)
+    {
+      // BLEデータ受信時
+      if (rx_Str.startsWith("gains:")) {
+        rcvgains_list = rx_Str.substring(6);
+        update_gains();
+        printGains();
+      }
+
+      if (rx_Str.startsWith("r:")) {
+        rcv_power = rx_Str.substring(2);
+        update_power();
+        printPower();
+      }
+
+      if      (rx_Str.startsWith("a")) { servoAngleTest = -20; }// サーボ制御左
+      else if (rx_Str.startsWith("b")) { servoAngleTest = 60; }// サーボ制御右
+      else if (rx_Str.startsWith("c")) { SendMsg = !SendMsg; }// センサデータ送信命令
+      else if (rx_Str.startsWith("d")) { servoAngleTest = 15; }// サーボ制御 中点
+      else { setVal = rx_Str.toInt(); printPower();}// 数字だけの時はモーターPWM Dutyを変える
+      BLE_Received = false;
+    }
+
+    if (SendMsg)
+    {
+      char string0[255] = "";
+      sprintf(string0, "%.2f, %.2f, %.2f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f\r\n", roll, pitch, yaw, 0, 0, 0, 100, 300, 200);
+      sendMsg(string0);
+    }
+
+  }
+}
+
+void printGYR()
+{
+  Serial.print(p);
+  Serial.print(',');
+  Serial.print(q);
+  Serial.print(',');
+  Serial.println(r);
+}
+
+void printAngles()
+{
+  Serial.print(roll);
+  Serial.print(',');
+  Serial.print(pitch);
+  Serial.print(',');
+  Serial.println(yaw);
+}
+
+void printServoAngle()
+{
+  Serial.println(elv_deg);
+}
+
+void printGains()
+{
+  Serial.print(Kp_roll);
+  Serial.print(',');
+  Serial.print(Kp_p);
+  Serial.print(',');
+  Serial.print(Kp_yaw);
+  Serial.print(',');
+  Serial.println(Kp_r);
+}
+
+void printPower()
+{
+  Serial.println(setVal);
+}
+
+void printErrors()
+{
+  Serial.println(setVal);
+}
+
