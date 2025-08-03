@@ -306,9 +306,9 @@ void control_loop()
   if (delta_a < -delta_a_max) delta_a = -delta_a_max;
   elv_deg = delta_a; 
 
-  Serial.print(delta_a_roll);
-  Serial.print(',');
-  Serial.println(delta_a_yaw);
+  // Serial.print(delta_a_roll);
+  // Serial.print(',');
+  // Serial.println(delta_a_yaw);
   
   // サーボ角度反映
   setServoAng(elv_deg); // リモートでサーボ動かすときはservoAngleTest、自律制御はelv_deg
