@@ -83,7 +83,7 @@ float p, q, r;
 
 float roll_ref = 0;  //センサーの取り付け誤差、機体特性によりロールのニュートラル角度がずれている前提で用意　真っ直ぐ飛んでいるときのロール角ををモニタリングしてここに入れる。
 float Kp_roll = 2.0;  // ロール角Pゲイン
-float Ki_roll = 0.5;  // ロール角Iゲイン
+float Ki_roll = 1.0;  // ロール角Iゲイン
 float error_roll_I = 0;  //ロールI制御用変数
 float error_roll_I_max = 10; //ロールI制御用制限値
 
@@ -96,7 +96,7 @@ float error_yaw_I = 0; // ヨーI制御用変数
 float error_yaw_I_max = 10; //ヨーI制御用制限値
 
 float Kp_r = 0.005;    // ヨーレートゲイン
-float delta_a_max = 30.0;  // サーボ最大偏角（deg）
+float delta_a_max = 60.0;  // サーボ最大偏角（deg）
 
 float pitch_ref = 60;       // 目標ピッチ角
 float Kp_pitch = 0.1;        // ピッチ角Pゲイン
@@ -250,7 +250,7 @@ void setup()
   // pinMode(D7, INPUT);
 
   digitalWrite(servo1Pin, HIGH); // ポート初期値
-  digitalWrite(MotorPin, HIGH); // ポート初期値
+  digitalWrite(MotorPin, LOW); // ポート初期値
   // LEDC関数を新しい形式に修正
   ledcAttach(MotorPin, 50, 8); // ピン、周波数、分解能
 
@@ -415,7 +415,7 @@ void loop()
     if (SendMsg)
     {
       char string0[255] = "";
-      sprintf(string0, "%.2f, %.2f, %.2f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f\r\n", roll, pitch, yaw, 0, 0, 0, 100, 300, 200);
+      sprintf(string0, "%.2f, %.2f, %.2f, %.4f, %.4f, %.4f, %.4f, %.4f, %.4f\r\n", roll, pitch, yaw, nowVal, 0, 0, 100, 300, 200);
       sendMsg(string0);
     }
 
